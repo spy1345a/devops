@@ -22,4 +22,4 @@ jobs:
 
       - name: Deploy
         run: |
-          ssh -i ~/.ssh/id_ed25519 -p ${{ secrets.VPS_SSH_PORT }} ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "echo Connected!"
+          ssh -i ~/.ssh/id_ed25519 -p ${{ secrets.VPS_SSH_PORT }} -v ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "echo Connected!"

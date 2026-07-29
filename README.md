@@ -348,3 +348,115 @@ Access at `https://demo-chat.duckdns.org`
 | Cloud | Oracle Cloud ARM (free tier) |
 | OS | Rocky Linux |
 | DNS | DuckDNS |
+
+
+---
+
+## Bonus: Load Balancer Architecture
+
+In a production setup with high traffic, a single Nginx container becomes a bottleneck.
+The solution is to run multiple backend containers behind a load balancer.
+
+ ```
+                      Users
+                        │
+                        ▼
+             demo-chat.duckdns.org
+                        │
+                        ▼
+           ┌────────────────────────┐
+           │     Nginx (LB)         │
+           │   upstream backends    │
+           └──────────┬─────────────┘
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+    ┌──────────┐ ┌──────────┐ ┌──────────┐
+    │ backend1 │ │ backend2 │ │ backend3 │
+    │ :8001    │ │ :8002    │ │ :8003    │
+    └──────────┘ └──────────┘ └──────────┘
+          │            │            │
+          └────────────┼────────────┘
+                       ▼
+              ┌─────────────────┐
+              │   Redis         │
+              │ (shared state)  │
+              │ active sessions │
+              └─────────────────┘
+```
+
+Nginx would be configured with an `upstream` block:
+
+```nginx
+upstream backend_pool {
+    least_conn;
+    server backend1:8000;
+    server backend2:8000;
+    server backend3:8000;
+}
+
+location /ws {
+    proxy_pass http://backend_pool;
+    ...
+}
+```
+
+`least_conn` routes each new connection to whichever backend currently has
+the fewest active connections — important for WebSockets since connections
+are long-lived, unlike regular HTTP requests.
+
+**Why Redis is needed here:** each backend container has its own
+`ConnectionManager` in memory. Without shared state, a message sent to
+`backend1` would never reach a user connected to `backend2`. Redis acts as
+a shared pub/sub bus — every backend publishes messages to Redis and every
+backend subscribes, so all connected users receive all messages regardless
+of which container they're on.
+
+---
+
+## Bonus: Auto-Scaling Approach
+
+Auto-scaling adds or removes backend containers automatically based on load.
+
+### With Docker Swarm (simplest)
+
+Docker Swarm is built into Docker and requires no extra tooling:
+
+```bash
+docker swarm init
+docker stack deploy -c docker-compose.yml chat
+```
+
+Then scale manually or automatically:
+
+```bash
+# manual scale
+docker service scale chat_backend=5
+
+# auto-scale based on CPU (via custom script or swarm-cronjob)
+```
+
+### With a Cloud Auto-Scaler (production approach)
+```
+                CloudWatch / OCI Monitoring
+                   (CPU > 70% for 2 min)
+                           │
+                           ▼
+                 Auto-Scaling Group triggers
+                           │
+                   ┌───────┴────────┐
+                   ▼                ▼
+              Spin up new      Terminate idle
+              VM + container   containers when
+              from snapshot    CPU < 30%
+```
+On Oracle Cloud this would use **Instance Pools** with a scaling policy:
+
+- Scale out: add a VM when average CPU across the pool exceeds 70%
+- Scale in: remove a VM when average CPU drops below 30% for 10 minutes
+- Minimum instances: 1 (always one backend running)
+- Maximum instances: 5 (cost cap)
+
+New VMs pull the latest Docker image on startup via a cloud-init script,
+register themselves with the load balancer automatically, and are ready
+to serve traffic within ~60 seconds of the scale-out trigger.

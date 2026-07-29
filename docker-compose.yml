@@ -17,6 +17,7 @@ services:
       # TODO: Candidates need to map the frontend directory correctly to serve the HTML
       - ./frontend:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro # adding tsl cerfi for https conenction
     depends_on:
       - backend
     restart: always

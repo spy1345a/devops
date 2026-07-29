@@ -21,4 +21,5 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_SSH_PORT }}
           script: |
-            echo "Connected!"
+            echo "Connected"
+            cd /home/rocky/demo/devops

@@ -13,6 +13,7 @@ services:
     container_name: chat-nginx
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       # TODO: Candidates need to map the frontend directory correctly to serve the HTML
       - ./frontend:/usr/share/nginx/html:ro

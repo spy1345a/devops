@@ -22,3 +22,9 @@ jobs:
           port: ${{ secrets.VPS_SSH_PORT }}
           script: |
             echo "Connected!"
+            echo "Deploying"
+            cd /home/rocky/demo/devops
+            git pull origin main
+            docker compose down
+            docker compose up -d --build
+            echo "Deploying done"

@@ -1,51 +1,350 @@
-# DevOps Engineering Assignment: Real-Time Chat App
+# Real-Time WebSocket Chat — Docker + Nginx + CI/CD
 
-Welcome! In this assignment, you are tasked with fixing a broken staging environment for our Real-Time Chat web application. 
+A containerized real-time multi-user chat application built with FastAPI WebSockets, served through an Nginx reverse proxy, deployed on Oracle Cloud, and automated via GitHub Actions CI/CD.
 
-A junior developer recently attempted to containerize this application using Docker and NGINX, but the deployment is currently failing on multiple fronts. Your job is to debug their configuration files and get the application fully operational via Docker Compose.
+---
 
-## System Architecture
+## Live Demo
 
-The application is built using two primary containers:
-1. **Backend (`backend`)**: A Python-based FastAPI server operating on Port 8000. It handles persistent, real-time WebSocket connections on the `/ws` endpoint.
-2. **Frontend Proxy (`nginx`)**: An NGINX container mapped to Port 80. It is responsible for serving the static files from the `frontend/` directory, while simultaneously intercepting and reverse-proxying all WebSocket upgrade requests down to the backend container.
+**URL:** [https://demo-chat.duckdns.org](https://demo-chat.duckdns.org)
 
-### Directory Structure
-```text
-realtime-chat-app/
+---
+
+## Repository
+
+[https://github.com/spy1345a/devops](https://github.com/spy1345a/devops)
+
+---
+
+## Architecture
+
+```
+                               User Browser
+                                    │
+                                    ▼
+                   https://demo-chat.duckdns.org (port 443)
+                                    │
+                                    ▼
+                    ┌──────────────────────────────────────┐
+                    │           Nginx Container            │
+                    │           (chat-nginx)               │
+                    │                                      │
+                    │  :80   →  redirect to HTTPS          │
+                    │  :443  →  serve frontend HTML        │
+                    │  /ws   →  proxy to backend:8000      │
+                    └───────────────┬──────────────────────┘
+                                    │   Docker bridge network
+                                    ▼
+                    ┌──────────────────────────────────────┐
+                    │         FastAPI Container            │
+                    │         (chat-backend)               │
+                    │         0.0.0.0:8000                 │
+                    │                                      │
+                    │  WebSocket /ws endpoint              │
+                    │  ConnectionManager (broadcast)       │
+                    └──────────────────────────────────────┘
+```
+
+Nginx is the only container exposed to the internet (ports 80 and 443). The backend is internal-only — reachable only within the Docker network via the service name `backend`.
+
+---
+
+## Project Structure
+
+```
+devops/
 ├── app/
-│   ├── main.py              # FastAPI application server
+│   ├── main.py              # FastAPI app with WebSocket endpoint
 │   └── requirements.txt     # Python dependencies
 ├── frontend/
-│   └── index.html           # Simple, styled single-page HTML client
-├── Dockerfile               # Instructions to build the Python backend image
-├── docker-compose.yml       # Composes both NGINX and Python Backend services
-└── nginx.conf               # Configuration for NGINX routing and WS proxy
+│   └── index.html           # Chat UI served by Nginx
+├── .github/
+│   └── workflows/
+│       └── deploy.yml       # CI/CD pipeline
+├── Dockerfile               # Backend container image
+├── docker-compose.yml       # Service orchestration
+├── nginx.conf               # Reverse proxy configuration
+└── README.md
 ```
 
-## Your Mission
+---
 
-If you run `docker-compose up -d --build` right now, the containers will start, but the application will not work. You need to debug and fix the following three critical issues:
+## How Docker Containers Are Set Up
 
-### 1. Fix the Docker Binding (Container Networking)
-The FastAPI backend container is refusing external connections—even from the NGINX container! 
-* **Hint:** Look at how the `uvicorn` command is binding its host in the `Dockerfile`. Inside a Docker container, binding to `localhost` or `127.0.0.1` makes the service unreachable to other containers on the Docker network.
+### Backend (`Dockerfile`)
+Built from `python:3.11-slim`. Installs dependencies from `app/requirements.txt`, copies `app/main.py`, and runs Uvicorn on `0.0.0.0:8000` so the server accepts connections from anywhere on the Docker network — not just localhost.
 
-### 2. Fix the Missing User Interface (Volume Mounts)
-If you navigate to `http://localhost` right now, you will likely see the default "Welcome to NGINX" page instead of the chat application.
-* **Hint:** Check `docker-compose.yml`. How is the `nginx` container supposed to get access to the static HTML files located in the local `frontend/` directory? 
+### Nginx
+Uses the official `nginx:alpine` image. Volumes mounted read-only:
+- `./frontend` → `/usr/share/nginx/html` — serves the chat UI static files
+- `./nginx.conf` → `/etc/nginx/nginx.conf` — applies the reverse proxy configuration
+- `/etc/letsencrypt` → `/etc/letsencrypt` — TLS certificates from Certbot
 
-### 3. Fix the WebSocket Tunnel (Reverse Proxy Configuration)
-Once the UI is visible, the chat app will continuously say "Disconnected" because the WebSocket handshake is failing.
-* **Hint #1:** In `nginx.conf`, the `proxy_pass` is attempting to route to `localhost:8000`. Does `localhost` mean the same thing inside the NGINX container as it does on your laptop? How do containers communicate with each other in a Compose network?
-* **Hint #2:** NGINX requires explicit headers to convert standard HTTP traffic into a persistent WebSocket tunnel. Some of the required `Upgrade` headers appear to be missing or disabled.
+Ports 80 and 443 are published to the host. Port 80 redirects to HTTPS.
 
-## Deliverables
+Both containers have `restart: always` so they automatically recover on crash or server reboot.
 
-Submit your finalized, corrected codebase. We will evaluate your submission by executing:
+---
+
+## How Docker Networking Works
+
+Docker Compose automatically creates a shared bridge network for all services defined in `docker-compose.yml`. Each service is registered by its **service name** as a DNS hostname on that network.
+
+```
+Service name → Internal hostname
+backend      → backend (port 8000, internal only)
+nginx        → nginx   (ports 80/443, exposed to internet)
+```
+
+The backend uses `expose: "8000"` instead of `ports` — this makes port 8000 reachable only within the Docker network, keeping it off the public internet.
+
+Nginx reaches the backend at `http://backend:8000`. No manual network blocks or IP addresses needed.
+
+---
+
+## How Nginx Reverse Proxy Works
+
+Nginx serves two roles simultaneously:
+
+**Static file server** — handles all `GET /` requests by serving `index.html` from the mounted frontend volume over HTTPS.
+
+**WebSocket reverse proxy** — forwards all `/ws` connections through to the FastAPI backend.
+
+```nginx
+# Redirect HTTP → HTTPS
+server {
+    listen 80;
+    server_name demo-chat.duckdns.org;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name demo-chat.duckdns.org;
+
+    ssl_certificate /etc/letsencrypt/live/demo-chat.duckdns.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/demo-chat.duckdns.org/privkey.pem;
+
+    location / {
+        root /usr/share/nginx/html;
+        index index.html;
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /ws {
+        proxy_pass http://backend:8000/ws;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+}
+```
+
+`proxy_read_timeout` and `proxy_send_timeout` are set to 86400s (24 hours) to keep long-lived WebSocket connections open without being dropped.
+
+---
+
+## How WebSocket Works Through Nginx
+
+A WebSocket connection starts as a standard HTTP request then asks the server to upgrade the protocol to a persistent bidirectional TCP tunnel. Nginx must explicitly pass the upgrade headers — without them, it treats the request as plain HTTP and the handshake fails.
+
+```
+Browser → HTTPS GET /ws (Upgrade: websocket)
+             ↓
+          Nginx receives, passes Upgrade headers to backend
+             ↓
+          Backend accepts, upgrades to WebSocket
+             ↓
+          Persistent bidirectional connection established
+             ↓
+          Messages broadcast to all connected clients
+```
+
+The FastAPI `ConnectionManager` maintains a list of all active WebSocket connections and broadcasts every chat message to every connected client in real time.
+
+---
+
+## CI/CD Pipeline
+
+The GitHub Actions workflow triggers on every push to `main`.
+
+```
+                                    Developer
+                                       │
+                                       │  git push origin main
+                                       ▼
+                           ┌─────────────────────────┐
+                           │     GitHub              │
+                           │     detects push        │
+                           └───────────┬─────────────┘
+                                       │  triggers workflow
+                                       ▼
+                           ┌─────────────────────────┐
+                           │   GitHub Actions        │
+                           │   ubuntu-latest runner  │
+                           │                         │
+                           │   actions/checkout@v4   │
+                           └───────────┬─────────────┘
+                                       │  appleboy/ssh-action
+                                       │  SSH into VPS
+                                       ▼
+                           ┌─────────────────────────┐
+                           │   Oracle Cloud VPS      │
+                           │   (Rocky Linux)         │
+                           │                         │
+                           │   cd ~/demo/devops      │
+                           │         │               │
+                           │         ▼               │
+                           │   git pull origin main  │
+                           │         │               │
+                           │         ▼               │
+                           │  docker compose down    │
+                           │         │               │
+                           │         ▼               │
+                           │  docker compose up      │
+                           │      -d --build         │
+                           │         │               │
+                           │         ▼               │
+                           │  ✓ Containers running   │
+                           └─────────────────────────┘
+                                       │
+                                       ▼
+                           https://demo-chat.duckdns.org
+                                 live and updated
+```
+
+**GitHub repository secrets required:**
+
+| Secret | Value |
+|---|---|
+| `VPS_HOST` | Oracle Cloud VM public IP |
+| `VPS_USER` | SSH username (`rocky`) |
+| `VPS_SSH_KEY` | Private key for SSH access |
+| `VPS_SSH_PORT` | SSH port (default `22`) |
+
+---
+
+## Bugs Found and Fixed
+
+### Bug 1 — Uvicorn bound to `127.0.0.1` (Dockerfile)
+
+**File:** `Dockerfile`
+
+**Problem:**
+```dockerfile
+CMD ["uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"]
+```
+`127.0.0.1` is the loopback interface — it only accepts connections from within the same container. The Nginx container on the Docker network could not reach it at all, even though both were on the same compose network.
+
+**Fix:**
+```dockerfile
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+`0.0.0.0` tells Uvicorn to listen on all network interfaces, making it reachable from other containers on the Docker bridge network.
+
+---
+
+### Bug 2 — Frontend volume not mounted (docker-compose.yml)
+
+**File:** `docker-compose.yml`
+
+**Problem:** The `frontend/` directory was not mapped into the Nginx container. Nginx had no HTML files to serve and showed the default "Welcome to nginx" page instead of the chat UI.
+
+**Fix:**
+```yaml
+volumes:
+  - ./frontend:/usr/share/nginx/html:ro
+  - ./nginx.conf:/etc/nginx/nginx.conf:ro
+```
+
+---
+
+### Bug 3 — Wrong backend hostname + WebSocket headers disabled (nginx.conf)
+
+**File:** `nginx.conf`
+
+**Problem 1:** `proxy_pass http://localhost:8000/ws` — `localhost` inside the Nginx container resolves to the Nginx container itself, not the FastAPI backend. The connection was going nowhere.
+
+**Fix:** Changed to `proxy_pass http://backend:8000/ws` — Docker's internal DNS resolves the Compose service name `backend` to the correct container.
+
+**Problem 2:** The two headers required for WebSocket protocol upgrade were commented out:
+```nginx
+# proxy_set_header Upgrade $http_upgrade;
+# proxy_set_header Connection "upgrade";
+```
+Without these, Nginx does not perform the HTTP → WebSocket upgrade and the handshake always fails.
+
+**Fix:** Uncommented both headers.
+
+---
+
+### Bug 4 — Port 443 not exposed (docker-compose.yml)
+
+**File:** `docker-compose.yml`
+
+**Problem:** After adding HTTPS, only port 80 was published to the host. The Nginx container was listening on 443 internally but the port was never opened to the outside world, causing `ERR_ADDRESS_UNREACHABLE`.
+
+**Fix:**
+```yaml
+ports:
+  - "80:80"
+  - "443:443"
+```
+
+---
+
+## Deployment Steps
+
+### Prerequisites
+- Oracle Cloud VM running Rocky Linux with Docker installed
+- Ports 80 and 443 open in OCI Security List AND Rocky Linux firewall (`firewall-cmd`)
+- DuckDNS domain pointed at the VM's public IP
+- TLS certificate obtained via Certbot
+
+### Get TLS certificate (one time)
 
 ```bash
-docker-compose up -d --build
+sudo dnf install certbot -y
+docker compose down
+sudo certbot certonly --standalone -d demo-chat.duckdns.org
+docker compose up -d
 ```
 
-If everything is configured correctly, we should instantly see the UI and be able to open multiple browser tabs at `http://localhost` to chat back and forth in real-time. Good luck!
+### Run manually
+
+```bash
+git clone https://github.com/spy1345a/devops.git
+cd devops
+docker compose up -d --build
+```
+
+Access at `https://demo-chat.duckdns.org`
+
+### Automated via CI/CD
+
+1. Add `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, and `VPS_SSH_PORT` to GitHub repository secrets
+2. Push any change to the `main` branch
+3. GitHub Actions SSHs into the server, pulls the latest code, and restarts containers automatically
+
+---
+
+## Tech Stack
+
+| Component | Technology |
+|---|---|
+| Backend | FastAPI + Uvicorn (Python 3.11) |
+| WebSocket | FastAPI WebSocket |
+| Frontend | HTML / JavaScript |
+| Reverse Proxy | Nginx Alpine |
+| TLS | Let's Encrypt via Certbot |
+| Containerization | Docker + Docker Compose v2 |
+| CI/CD | GitHub Actions + appleboy/ssh-action |
+| Cloud | Oracle Cloud ARM (free tier) |
+| OS | Rocky Linux |
+| DNS | DuckDNS |
